@@ -8,13 +8,16 @@ from groq import Groq
 
 app = Flask(__name__)
 
+# ✅ Use temp folder (works on Render)
 UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# ✅ Route to serve uploaded images
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
-# ✅ Better: use environment variable instead of hardcoding
+# ✅ API key from environment
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -53,7 +56,7 @@ def preprocess_for_handwriting(path):
     kernel = np.ones((2, 2), np.uint8)
     opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
 
-    # Crop text area
+    # Crop text
     coords = cv2.findNonZero(opening)
     if coords is not None:
         x, y, w, h = cv2.boundingRect(coords)
@@ -67,7 +70,10 @@ def preprocess_for_handwriting(path):
 
     final = cv2.bitwise_not(upscaled)
 
-    processed_path = path.replace(".", "_ocr_ready.")
+    # ✅ FIXED filename issue
+    name, ext = os.path.splitext(path)
+    processed_path = f"{name}_ocr_ready{ext}"
+
     cv2.imwrite(processed_path, final)
     return processed_path
 
@@ -79,6 +85,14 @@ def encode_image_to_base64(image_path):
 
 def detect_text_with_groq(image_path):
     try:
+        if not GROQ_API_KEY:
+            return {
+                "text": "",
+                "is_malayalam": False,
+                "language": "Unknown",
+                "error": "API key not set"
+            }
+
         image_data = encode_image_to_base64(image_path)
 
         ext = os.path.splitext(image_path)[1].lower()
@@ -120,7 +134,7 @@ Respond ONLY in JSON:
 
         response_text = response.choices[0].message.content.strip()
 
-        # Clean markdown if present
+        # Clean markdown
         if response_text.startswith("```"):
             parts = response_text.split("```")
             response_text = parts[1] if len(parts) > 1 else response_text
@@ -165,7 +179,6 @@ def index():
             if processed_path is None:
                 error_msg = "Error: Could not read image."
             else:
-                # ✅ FIXED: use processed image
                 result = detect_text_with_groq(processed_path)
 
                 if result["error"]:
@@ -180,13 +193,13 @@ def index():
         else:
             error_msg = "Please upload an image."
 
-   return render_template(
-    "index.html",
-    text=text,
-    image=os.path.basename(image_path) if image_path else "",
-    processed=os.path.basename(processed_path) if processed_path else "",
-    error=error_msg
-)
+    return render_template(
+        "index.html",
+        text=text,
+        image=os.path.basename(image_path) if image_path else "",
+        processed=os.path.basename(processed_path) if processed_path else "",
+        error=error_msg
+    )
 
 
 if __name__ == "__main__":
