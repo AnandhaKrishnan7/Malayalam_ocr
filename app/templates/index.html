@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Malayalam Handwriting OCR</title>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Malayalam:wght@400;600&family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: #f0f4f8;
+            min-height: 100vh;
+            padding: 30px 16px;
+            color: #1a202c;
+        }
+
+        .container {
+            max-width: 640px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 1.7rem;
+            font-weight: 700;
+            color: #1a202c;
+            margin-bottom: 6px;
+        }
+
+        .subtitle {
+            font-size: 0.85rem;
+            color: #718096;
+            margin-bottom: 24px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 14px;
+            padding: 24px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.08);
+            margin-bottom: 20px;
+        }
+
+        /* Upload area */
+        .upload-area {
+            border: 2px dashed #cbd5e0;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            background: #f7fafc;
+            margin-bottom: 16px;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+        .upload-area:hover { border-color: #4299e1; }
+        .upload-area input[type="file"] {
+            display: none;
+        }
+        .upload-label {
+            display: block;
+            cursor: pointer;
+            color: #4a5568;
+            font-size: 0.9rem;
+        }
+        .upload-label span {
+            color: #3182ce;
+            font-weight: 600;
+        }
+        #file-name {
+            margin-top: 8px;
+            font-size: 0.8rem;
+            color: #718096;
+        }
+
+        .predict-btn {
+            width: 100%;
+            background: #3182ce;
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: 'Poppins', sans-serif;
+            transition: background 0.2s;
+        }
+        .predict-btn:hover { background: #2b6cb0; }
+        .predict-btn:active { background: #2c5282; }
+
+        /* Section headers */
+        .section-title {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #4a5568;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 10px;
+        }
+
+        /* Image display */
+        .image-wrapper {
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #f7fafc;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 80px;
+            padding: 10px;
+        }
+        .image-wrapper img {
+            max-width: 100%;
+            max-height: 180px;
+            object-fit: contain;
+            border-radius: 4px;
+        }
+
+        /* Detected text box */
+        .text-result {
+            background: #ebf8ff;
+            border: 1.5px solid #90cdf4;
+            border-radius: 10px;
+            padding: 18px 20px;
+            font-family: 'Noto Sans Malayalam', serif;
+            font-size: 1.5rem;
+            line-height: 1.8;
+            color: #1a365d;
+            min-height: 60px;
+            word-break: break-word;
+        }
+
+        /* Error box */
+        .error-result {
+            background: #fff5f5;
+            border: 1.5px solid #feb2b2;
+            border-radius: 10px;
+            padding: 14px 18px;
+            color: #c53030;
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+
+        /* Badge */
+        .badge {
+            display: inline-block;
+            background: #c6f6d5;
+            color: #276749;
+            font-size: 0.68rem;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 20px;
+            margin-left: 8px;
+            vertical-align: middle;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .divider {
+            height: 1px;
+            background: #e2e8f0;
+            margin: 18px 0;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <h1>Malayalam OCR</h1>
+    <p class="subtitle">Upload a handwritten Malayalam image to detect text using Gemini Vision AI</p>
+
+    <!-- Upload Card -->
+    <div class="card">
+        <form method="POST" enctype="multipart/form-data" id="upload-form">
+            <div class="upload-area" onclick="document.getElementById('file-input').click()">
+                <label class="upload-label">
+                    📁 <span>Click to choose image</span> or drag and drop
+                    <input type="file" id="file-input" name="image" accept="image/*"
+                           onchange="document.getElementById('file-name').textContent = this.files[0]?.name || 'No file chosen'">
+                </label>
+                <div id="file-name">No file chosen</div>
+            </div>
+            <button type="submit" class="predict-btn">🔍 Predict</button>
+        </form>
+    </div>
+
+    <!-- Results Card — only show if something was uploaded -->
+    {% if image %}
+    <div class="card">
+
+        <!-- Uploaded Image -->
+        <div class="section-title">Uploaded Image</div>
+        <div class="image-wrapper">
+            <img src="{{ image }}" alt="Uploaded image">
+        </div>
+
+        {% if processed %}
+        <div class="divider"></div>
+
+        <!-- Processed Image -->
+        <div class="section-title">Processed Image</div>
+        <div class="image-wrapper">
+            <img src="{{ processed }}" alt="Processed image">
+        </div>
+        {% endif %}
+
+        <div class="divider"></div>
+
+        <!-- Detected Text -->
+        <div class="section-title">
+            Detected Text
+            
+        </div>
+
+        {% if text %}
+            <div class="text-result">{{ text }}</div>
+        {% elif error %}
+            <div class="error-result">{{ error }}</div>
+        {% else %}
+            <div class="error-result">No text could be detected. Please try again with a clearer image.</div>
+        {% endif %}
+
+    </div>
+    {% endif %}
+
+</div>
+</body>
+</html>
