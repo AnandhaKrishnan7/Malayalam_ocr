@@ -169,7 +169,7 @@
 <div class="container">
 
     <h1>Malayalam OCR</h1>
-    <p class="subtitle">Upload a handwritten Malayalam image to detect text using Gemini Vision AI</p>
+    <p class="subtitle">Upload a handwritten Malayalam image to detect text</p>
 
     <!-- Upload Card -->
     <div class="card">
@@ -193,7 +193,7 @@
         <!-- Uploaded Image -->
         <div class="section-title">Uploaded Image</div>
         <div class="image-wrapper">
-            <img src="{{ image }}" alt="Uploaded image">
+            <img src="/uploads/{{ image }}" alt="Uploaded image">
         </div>
 
         {% if processed %}
@@ -202,7 +202,7 @@
         <!-- Processed Image -->
         <div class="section-title">Processed Image</div>
         <div class="image-wrapper">
-            <img src="{{ processed }}" alt="Processed image">
+            <img src="/uploads/{{ processed }}" alt="Processed image">
         </div>
         {% endif %}
 
