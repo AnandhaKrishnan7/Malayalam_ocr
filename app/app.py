@@ -3,13 +3,16 @@ import cv2
 import json
 import base64
 import numpy as np
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, send_from_directory
 from groq import Groq
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
 # ✅ Better: use environment variable instead of hardcoding
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -177,13 +180,13 @@ def index():
         else:
             error_msg = "Please upload an image."
 
-    return render_template(
-        "index.html",
-        text=text,
-        image=image_path,
-        processed=processed_path,
-        error=error_msg
-    )
+   return render_template(
+    "index.html",
+    text=text,
+    image=os.path.basename(image_path) if image_path else "",
+    processed=os.path.basename(processed_path) if processed_path else "",
+    error=error_msg
+)
 
 
 if __name__ == "__main__":
