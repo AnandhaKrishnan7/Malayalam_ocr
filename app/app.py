@@ -8,7 +8,7 @@ from groq import Groq
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "static/uploads"
+UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # ✅ Better: use environment variable instead of hardcoding
