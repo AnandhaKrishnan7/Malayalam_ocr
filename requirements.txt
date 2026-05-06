@@ -3,3 +3,4 @@ opencv-python-headless
 numpy
 google-cloud-vision
 google-auth
+gunicorn
