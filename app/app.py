@@ -4,7 +4,8 @@ import json
 import base64
 import numpy as np
 from flask import Flask, render_template, request, send_from_directory
-from groq import Groq
+from google.cloud import vision
+from google.oauth2 import service_account
 
 app = Flask(__name__)
 
@@ -15,37 +16,53 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
+
+def get_vision_client():
+    """
+    Initialize Google Vision client.
+    Supports two auth methods:
+      1. GOOGLE_APPLICATION_CREDENTIALS env var pointing to a JSON key file
+      2. GOOGLE_CREDENTIALS_JSON env var containing the JSON key content directly
+         (useful for Render where you can't upload files easily)
+    """
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if creds_json:
+        import json as json_mod
+        creds_dict = json_mod.loads(creds_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        return vision.ImageAnnotatorClient(credentials=credentials)
+    # Fallback: GOOGLE_APPLICATION_CREDENTIALS file path
+    return vision.ImageAnnotatorClient()
 
 
 def preprocess_for_handwriting(path):
     """
-    Gentle preprocessing: only denoise + upscale.
-    Avoid aggressive morphological ops that break Malayalam character strokes.
+    Gentle preprocessing: mild sharpening + 2x upscale.
+    Do NOT use morphological ops — they break Malayalam curved strokes.
     """
     img = cv2.imread(path)
     if img is None:
         return None
 
-    # Check if image is mostly white/light background (typical scan)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     mean_brightness = np.mean(gray)
 
-    # If image is already clean (bright background), just upscale
     if mean_brightness > 180:
-        # Mild sharpening only
+        # Clean image: mild sharpening
         kernel = np.array([[0, -0.5, 0],
                            [-0.5, 3, -0.5],
                            [0, -0.5, 0]])
-        sharpened = cv2.filter2D(gray, -1, kernel)
-        upscaled = cv2.resize(sharpened, None, fx=2, fy=2,
-                              interpolation=cv2.INTER_CUBIC)
+        processed = cv2.filter2D(gray, -1, kernel)
     else:
-        # Darker/noisy image: denoise then upscale
-        denoised = cv2.fastNlMeansDenoising(gray, h=10)
-        upscaled = cv2.resize(denoised, None, fx=2, fy=2,
-                              interpolation=cv2.INTER_CUBIC)
+        # Noisy image: denoise first
+        processed = cv2.fastNlMeansDenoising(gray, h=10)
+
+    # 2x upscale for better character resolution
+    upscaled = cv2.resize(processed, None, fx=2, fy=2,
+                          interpolation=cv2.INTER_CUBIC)
 
     name, ext = os.path.splitext(path)
     processed_path = f"{name}_ocr_ready{ext}"
@@ -53,118 +70,76 @@ def preprocess_for_handwriting(path):
     return processed_path
 
 
-def encode_image_to_base64(image_path):
-    with open(image_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+MALAYALAM_UNICODE_RANGE = (0x0D00, 0x0D7F)
+
+def contains_malayalam(text):
+    """Check if text contains Malayalam Unicode characters."""
+    for char in text:
+        code = ord(char)
+        if MALAYALAM_UNICODE_RANGE[0] <= code <= MALAYALAM_UNICODE_RANGE[1]:
+            return True
+    return False
 
 
-def detect_text_with_groq(original_path, processed_path):
+def detect_text_with_google_vision(image_path):
     """
-    Send BOTH original and processed images for better accuracy.
-    Use a strict transcription prompt.
+    Use Google Cloud Vision DOCUMENT_TEXT_DETECTION for handwriting.
+    This is purpose-built for handwritten documents and supports Malayalam.
+    Free tier: 1000 images/month at no cost.
     """
     try:
-        if not GROQ_API_KEY:
+        vision_client = get_vision_client()
+
+        with open(image_path, "rb") as f:
+            content = f.read()
+
+        image = vision.Image(content=content)
+
+        # Use image_context to hint Malayalam language for better accuracy
+        image_context = vision.ImageContext(
+            language_hints=["ml"]  # 'ml' = Malayalam BCP-47 code
+        )
+
+        # DOCUMENT_TEXT_DETECTION is optimized for handwritten documents
+        response = vision_client.document_text_detection(
+            image=image,
+            image_context=image_context
+        )
+
+        if response.error.message:
             return {
                 "text": "",
                 "is_malayalam": False,
                 "language": "Unknown",
-                "error": "GROQ_API_KEY not set"
+                "error": f"Google Vision API error: {response.error.message}"
             }
 
-        # Prefer original image — preprocessing can distort strokes
-        image_data = encode_image_to_base64(original_path)
+        full_text = response.full_text_annotation.text.strip()
 
-        ext = os.path.splitext(original_path)[1].lower()
-        media_type_map = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-            ".gif": "image/gif",
-        }
-        media_type = media_type_map.get(ext, "image/jpeg")
+        if not full_text:
+            return {
+                "text": "",
+                "is_malayalam": False,
+                "language": "Unknown",
+                "error": None
+            }
 
-        # Strict transcription prompt — prevents hallucination
-        prompt = """You are a Malayalam handwriting transcription expert.
+        is_malayalam = contains_malayalam(full_text)
 
-Your ONLY job is to read and transcribe EXACTLY what is written in this image.
-
-STRICT RULES:
-- Transcribe the Malayalam text character by character, exactly as written
-- Do NOT translate, interpret, or guess meaning
-- Do NOT add words that are not clearly visible
-- Do NOT replace or substitute characters — copy them exactly
-- If a word is unclear, write your best reading of those exact characters
-- Respond ONLY in this exact JSON format, nothing else:
-
-{
-  "language": "Malayalam",
-  "is_malayalam": true,
-  "text": "<exact transcription here>"
-}
-
-If the image contains no Malayalam text:
-{
-  "language": "<detected language>",
-  "is_malayalam": false,
-  "text": ""
-}"""
-
-        response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{media_type};base64,{image_data}"
-                        }
-                    },
-                    {"type": "text", "text": prompt}
-                ]
-            }],
-            max_tokens=512,
-            temperature=0.0  # Zero temperature = no creativity, pure transcription
-        )
-
-        response_text = response.choices[0].message.content.strip()
-
-        # Strip markdown code fences if present
-        if "```" in response_text:
-            parts = response_text.split("```")
-            for part in parts:
-                part = part.strip()
-                if part.startswith("json"):
-                    part = part[4:].strip()
-                if part.startswith("{"):
-                    response_text = part
-                    break
-
-        # Find JSON object in response
-        start = response_text.find("{")
-        end = response_text.rfind("}") + 1
-        if start != -1 and end > start:
-            response_text = response_text[start:end]
-
-        result = json.loads(response_text)
+        # Try to detect language from response pages
+        language = "Unknown"
+        if response.full_text_annotation.pages:
+            page = response.full_text_annotation.pages[0]
+            if page.property.detected_languages:
+                language = page.property.detected_languages[0].language_code
 
         return {
-            "text": result.get("text", "").strip(),
-            "is_malayalam": result.get("is_malayalam", False),
-            "language": result.get("language", "Unknown"),
+            "text": full_text,
+            "is_malayalam": is_malayalam,
+            "language": language or ("Malayalam" if is_malayalam else "Unknown"),
             "error": None
         }
 
-    except json.JSONDecodeError as e:
-        # If JSON parsing fails, try to extract text directly
-        return {
-            "text": "",
-            "is_malayalam": False,
-            "language": "Unknown",
-            "error": f"JSON parse error: {str(e)} | Raw: {response_text[:200]}"
-        }
     except Exception as e:
         return {
             "text": "",
@@ -180,6 +155,7 @@ def index():
     image_path = ""
     processed_path = ""
     error_msg = ""
+    language = ""
 
     if request.method == "POST":
         file = request.files.get("image")
@@ -193,21 +169,26 @@ def index():
             if processed_path is None:
                 error_msg = "Error: Could not read image."
             else:
-                # Pass both original and processed paths
-                result = detect_text_with_groq(image_path, processed_path)
+                # Send original to Vision API (better quality than preprocessed)
+                result = detect_text_with_google_vision(image_path)
 
                 if result["error"]:
                     error_msg = result["error"]
                 elif result["is_malayalam"]:
                     text = result["text"] or "No clear text detected."
+                    language = result["language"]
+                elif result["text"]:
+                    # Text detected but not Malayalam
+                    error_msg = f"Not Malayalam. Detected language: {result['language']}. Text: {result['text']}"
                 else:
-                    error_msg = f"Not Malayalam. Detected: {result['language']}"
+                    error_msg = "No text detected in the image."
         else:
             error_msg = "Please upload an image."
 
     return render_template(
         "index.html",
         text=text,
+        language=language,
         image=os.path.basename(image_path) if image_path else "",
         processed=os.path.basename(processed_path) if processed_path else "",
         error=error_msg
