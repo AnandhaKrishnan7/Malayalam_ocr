@@ -8,73 +8,48 @@ from groq import Groq
 
 app = Flask(__name__)
 
-# ✅ Use temp folder (works on Render)
 UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ✅ Route to serve uploaded images
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
-# ✅ API key from environment
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
 
 def preprocess_for_handwriting(path):
-    """Preprocess the image: remove lines, denoise, upscale."""
+    """
+    Gentle preprocessing: only denoise + upscale.
+    Avoid aggressive morphological ops that break Malayalam character strokes.
+    """
     img = cv2.imread(path)
     if img is None:
         return None
 
+    # Check if image is mostly white/light background (typical scan)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    thresh = cv2.threshold(gray, 0, 255,
-                           cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    mean_brightness = np.mean(gray)
 
-    # Remove horizontal lines
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
-    remove_horizontal = cv2.morphologyEx(
-        thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
-    cnts = cv2.findContours(remove_horizontal, cv2.RETR_EXTERNAL,
-                            cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-    for c in cnts:
-        cv2.drawContours(thresh, [c], -1, (0, 0, 0), 5)
+    # If image is already clean (bright background), just upscale
+    if mean_brightness > 180:
+        # Mild sharpening only
+        kernel = np.array([[0, -0.5, 0],
+                           [-0.5, 3, -0.5],
+                           [0, -0.5, 0]])
+        sharpened = cv2.filter2D(gray, -1, kernel)
+        upscaled = cv2.resize(sharpened, None, fx=2, fy=2,
+                              interpolation=cv2.INTER_CUBIC)
+    else:
+        # Darker/noisy image: denoise then upscale
+        denoised = cv2.fastNlMeansDenoising(gray, h=10)
+        upscaled = cv2.resize(denoised, None, fx=2, fy=2,
+                              interpolation=cv2.INTER_CUBIC)
 
-    # Remove vertical lines
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
-    remove_vertical = cv2.morphologyEx(
-        thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
-    cnts = cv2.findContours(remove_vertical, cv2.RETR_EXTERNAL,
-                            cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-    for c in cnts:
-        cv2.drawContours(thresh, [c], -1, (0, 0, 0), 5)
-
-    # Noise removal
-    kernel = np.ones((2, 2), np.uint8)
-    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
-
-    # Crop text
-    coords = cv2.findNonZero(opening)
-    if coords is not None:
-        x, y, w, h = cv2.boundingRect(coords)
-        pad = 20
-        opening = opening[max(0, y - pad):y + h + pad,
-                          max(0, x - pad):x + w + pad]
-
-    # Upscale
-    upscaled = cv2.resize(opening, None, fx=2, fy=2,
-                          interpolation=cv2.INTER_CUBIC)
-
-    final = cv2.bitwise_not(upscaled)
-
-    # ✅ FIXED filename issue
     name, ext = os.path.splitext(path)
     processed_path = f"{name}_ocr_ready{ext}"
-
-    cv2.imwrite(processed_path, final)
+    cv2.imwrite(processed_path, upscaled)
     return processed_path
 
 
@@ -83,19 +58,24 @@ def encode_image_to_base64(image_path):
         return base64.b64encode(f.read()).decode("utf-8")
 
 
-def detect_text_with_groq(image_path):
+def detect_text_with_groq(original_path, processed_path):
+    """
+    Send BOTH original and processed images for better accuracy.
+    Use a strict transcription prompt.
+    """
     try:
         if not GROQ_API_KEY:
             return {
                 "text": "",
                 "is_malayalam": False,
                 "language": "Unknown",
-                "error": "API key not set"
+                "error": "GROQ_API_KEY not set"
             }
 
-        image_data = encode_image_to_base64(image_path)
+        # Prefer original image — preprocessing can distort strokes
+        image_data = encode_image_to_base64(original_path)
 
-        ext = os.path.splitext(image_path)[1].lower()
+        ext = os.path.splitext(original_path)[1].lower()
         media_type_map = {
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
@@ -105,12 +85,29 @@ def detect_text_with_groq(image_path):
         }
         media_type = media_type_map.get(ext, "image/jpeg")
 
-        prompt = """You are an expert in reading handwritten Malayalam text.
+        # Strict transcription prompt — prevents hallucination
+        prompt = """You are a Malayalam handwriting transcription expert.
 
-Respond ONLY in JSON:
+Your ONLY job is to read and transcribe EXACTLY what is written in this image.
+
+STRICT RULES:
+- Transcribe the Malayalam text character by character, exactly as written
+- Do NOT translate, interpret, or guess meaning
+- Do NOT add words that are not clearly visible
+- Do NOT replace or substitute characters — copy them exactly
+- If a word is unclear, write your best reading of those exact characters
+- Respond ONLY in this exact JSON format, nothing else:
+
 {
-  "language": "",
-  "is_malayalam": true/false,
+  "language": "Malayalam",
+  "is_malayalam": true,
+  "text": "<exact transcription here>"
+}
+
+If the image contains no Malayalam text:
+{
+  "language": "<detected language>",
+  "is_malayalam": false,
   "text": ""
 }"""
 
@@ -129,28 +126,45 @@ Respond ONLY in JSON:
                 ]
             }],
             max_tokens=512,
-            temperature=0.1
+            temperature=0.0  # Zero temperature = no creativity, pure transcription
         )
 
         response_text = response.choices[0].message.content.strip()
 
-        # Clean markdown
-        if response_text.startswith("```"):
+        # Strip markdown code fences if present
+        if "```" in response_text:
             parts = response_text.split("```")
-            response_text = parts[1] if len(parts) > 1 else response_text
-            if response_text.startswith("json"):
-                response_text = response_text[4:]
-            response_text = response_text.strip()
+            for part in parts:
+                part = part.strip()
+                if part.startswith("json"):
+                    part = part[4:].strip()
+                if part.startswith("{"):
+                    response_text = part
+                    break
+
+        # Find JSON object in response
+        start = response_text.find("{")
+        end = response_text.rfind("}") + 1
+        if start != -1 and end > start:
+            response_text = response_text[start:end]
 
         result = json.loads(response_text)
 
         return {
-            "text": result.get("text", ""),
+            "text": result.get("text", "").strip(),
             "is_malayalam": result.get("is_malayalam", False),
             "language": result.get("language", "Unknown"),
             "error": None
         }
 
+    except json.JSONDecodeError as e:
+        # If JSON parsing fails, try to extract text directly
+        return {
+            "text": "",
+            "is_malayalam": False,
+            "language": "Unknown",
+            "error": f"JSON parse error: {str(e)} | Raw: {response_text[:200]}"
+        }
     except Exception as e:
         return {
             "text": "",
@@ -179,17 +193,15 @@ def index():
             if processed_path is None:
                 error_msg = "Error: Could not read image."
             else:
-                result = detect_text_with_groq(processed_path)
+                # Pass both original and processed paths
+                result = detect_text_with_groq(image_path, processed_path)
 
                 if result["error"]:
                     error_msg = result["error"]
-
                 elif result["is_malayalam"]:
                     text = result["text"] or "No clear text detected."
-
                 else:
                     error_msg = f"Not Malayalam. Detected: {result['language']}"
-
         else:
             error_msg = "Please upload an image."
 
